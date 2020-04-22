@@ -7,7 +7,7 @@ import * as helper from './lib/helper.js';
 
 const log = (...args) => {
   const d = new Date();
-  const pad = (x) => (x < 0 ? '0' + x : x);
+  const pad = (x) => (x < 10 ? '0' + x : x);
   const ts = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   process.stderr.write(`[${chalk.gray(ts)}] ${args.join(' ')}\n`);
 };
@@ -122,7 +122,7 @@ function processContainers(containers) {
     } else if (t.pending) {
       color = chalk.blue;
     }
-    const parts = [chalk.magenta(t.date), chalk.gray(t.cardName), color(dollarAmount), t.description];
+    const parts = [chalk.gray(t.date), color(dollarAmount), chalk.gray(t.cardName), t.description];
     process.stderr.write(parts.join(' ') + '\n');
   }
 
