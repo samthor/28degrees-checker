@@ -27,11 +27,7 @@ const headless = false;
 async function loadMaybeLogin(page, url) {
   await page.goto(url, {waitUntil: 'networkidle2'});
 
-  const isLoginPage = () => page.evaluate(() => {
-    return Boolean(document.body.querySelector('input#AccessToken_Username'));
-  });
-
-  if (await isLoginPage()) {
+  if (!helper.urlIs(page, url)) {
     const creds = await helper.loadJSON('./config/creds.json');
     await helper.maybeGoto(page, LOGIN_URL);
     await page.type('#AccessToken_Username', creds.username);
@@ -44,7 +40,10 @@ async function loadMaybeLogin(page, url) {
       page.waitForNavigation({waitUntil: 'networkidle2'}),
     ]);
 
-    if (await isLoginPage()) {
+    const isLoginPage = await page.evaluate(() => {
+      return Boolean(document.body.querySelector('input#AccessToken_Username'));
+    });
+    if (isLoginPage) {
       throw new Error(`could not login, is login page again: ${page.url()}`);
     }
   }
@@ -53,6 +52,7 @@ async function loadMaybeLogin(page, url) {
   log('Saving', cookies.length, 'cookies');
   await fs.writeFile('./config/cookies.json', JSON.stringify(cookies));
 
+  // TODO: this seems to load the core page twice
   await helper.maybeGoto(page, url);
 }
 
