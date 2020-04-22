@@ -1,96 +1,136 @@
 #!/usr/bin/env node
 
-const puppeteer = require('puppeteer');
-const fs = require('fs');
+import puppeteer from 'puppeteer';
+import chalk from 'chalk';
+import {promises as fs} from 'fs';
+import * as helper from './lib/helper.js';
+
+const log = (...args) => {
+  const d = new Date();
+  const pad = (x) => (x < 0 ? '0' + x : x);
+  const ts = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  process.stderr.write(`[${chalk.gray(ts)}] ${args.join(' ')}\n`);
+};
+
 
 process.on('unhandledRejection', (err) => {
   console.error(err);
   process.exit(1);
 });
 
-const ACCOUNTS_URL = 'https://ibanking.stgeorge.com.au/ibank/viewAccountPortfolio.html';
-const LOGIN_URL = 'https://ibanking.stgeorge.com.au/ibank/loginPage.action';
 
-const creds = require('./creds.json');
+const ACCOUNT_URL = 'https://28degrees-online.latitudefinancial.com.au/wps/myportal/28degrees/public/home';
+const LOGIN_URL = 'https://28degrees-online.latitudefinancial.com.au/access/login';
 const headless = false;
 
-async function saveCookies(page) {
-  const cookies = await page.cookies();
-  fs.writeFileSync('./cookies.json', JSON.stringify(cookies));
-}
 
 async function loadMaybeLogin(page, url) {
   await page.goto(url, {waitUntil: 'networkidle2'});
-  const hasError = (await page.evaluate(() => {
-    return Boolean(document.body.querySelector('.ico.ico-error'));
-  }));
-  if (!hasError) {
-    saveCookies(page);
-    return;
-  }
 
-  await page.goto(LOGIN_URL, {waitUntil: 'networkidle2'});
-  await page.type('#access-number', creds.accessNumber);
-  await page.type('#securityNumber', creds.securityNumber);
-  await page.type('#internet-password', creds.password)
-
-  // run both at once, otherwise looks for _next_ nav way after click
-  await Promise.all([
-    page.click('#logonButton'),
-    page.waitForNavigation({waitUntil: 'networkidle2'}),
-  ]);
-
-  // save login cookies
-  await saveCookies(page);
-
-  // redirect to desired page
-  if (page.url() !== url) {
-    await page.goto(url, {waitUntil: 'networkidle2'});
-  }
-}
-
-(async () => {
-  const browser = await puppeteer.launch({headless});
-  const page = await browser.newPage();
-
-  let cookies = [];
-  try {
-    const raw = fs.readFileSync('./cookies.json', 'utf-8');
-    cookies = JSON.parse(raw);
-  } catch (e) {};
-  await page.setCookie(...cookies);
-  console.info('loaded', cookies.length, 'cookies');
-
-  await loadMaybeLogin(page, ACCOUNTS_URL);
-
-  const details = await page.$eval('#acctSummaryList', (ul) => {
-    const maybeReadValue = (li, titleClass) => {
-      const node = li.querySelector(`dt.${titleClass}`);
-      if (!node || !node.nextElementSibling) {
-        return null;
-      }
-      // regexp ugh (greedy: not a space, anything*, not a space)
-      const raw = node.nextElementSibling.textContent.match(/([^\s].*[^\s])/)[0] || '';
-      const sign = (raw[0] === '-' ? -1 : +1);   // retain '-'
-      const safe = raw.replace(/[^\d\.]/g, '');  // remove non-number, non-'.'
-      const value = +safe;
-      if (isNaN(value)) {
-        return null;
-      }
-      return value * sign;
-    };
-
-    return Array.from(ul.children).map((li) => {
-      return {
-        alias: li.getAttribute('data-acctalias'),
-        balance: maybeReadValue(li, 'account-balance'),
-        available: maybeReadValue(li, 'available-balance'),
-        account: maybeReadValue(li, 'account-number'),
-        bsb: maybeReadValue(li, 'bsb-number'),
-      };
-    });
+  const isLoginPage = () => page.evaluate(() => {
+    return Boolean(document.body.querySelector('input#AccessToken_Username'));
   });
 
-  console.info(details);
-  await page.close();
+  if (await isLoginPage()) {
+    const creds = await helper.loadJSON('./config/creds.json');
+    await helper.maybeGoto(page, LOGIN_URL);
+    await page.type('#AccessToken_Username', creds.username);
+    await page.type('#AccessToken_Password', creds.password);
+    log('Logging in...')
+
+    // run both at once, otherwise looks for _next_ nav way after click
+    await Promise.all([
+      page.click('#login-submit'),
+      page.waitForNavigation({waitUntil: 'networkidle2'}),
+    ]);
+
+    if (await isLoginPage()) {
+      throw new Error(`could not login, is login page again: ${page.url()}`);
+    }
+  }
+
+  const cookies = await page.cookies();
+  log('Saving', cookies.length, 'cookies');
+  await fs.writeFile('./config/cookies.json', JSON.stringify(cookies));
+
+  await helper.maybeGoto(page, url);
+}
+
+
+function processContainers(containers) {
+  const q = (container, name) => {
+    const el = container.querySelector(`[name="${name}"]`);
+    return el ? el.textContent : '';
+  };
+
+  const processRow = (container) => {
+    const pending = container.querySelector('[name="Pending_transactionAmount"]');
+
+    const rawAmount = q(container,
+        pending ? 'Pending_transactionAmount' : 'Transaction_Amount');
+    const amount = parseFloat(rawAmount.replace(/[^\d\.\-]/g, ''));
+
+    const description = q(container, pending ? 'Pending_transactionDescription' : 'Transaction_TransactionDescription');
+    const cardName = q(container, pending ? 'Pending_cardName' : 'Transaction_CardName');
+
+    const rawDate = q(container, pending ? 'Pending_transactionDate' : 'Transaction_TransactionDate');
+    const d = new Date(rawDate);
+    if (+d) {
+      const inverseHours = d.getTimezoneOffset() / 60;
+      d.setUTCHours(d.getUTCHours() - inverseHours);
+    }
+
+    return {
+      pending: Boolean(pending),
+      description,
+      cardName,
+      amount,
+      date: d.toISOString().slice(0, 10),
+    };
+  };
+  return containers.map(processRow);
+}
+
+
+(async () => {
+  const args = [`--window-size=${~~helper.randomRange(1000, 1200)},${~~helper.randomRange(600, 800)}`];
+  const browser = await puppeteer.launch({headless, args});
+  const page = await browser.newPage();
+
+  const cookies = await helper.loadJSON('./config/cookies.json', []);
+  log('Loaded', cookies.length, 'cookies');
+  await page.setCookie(...cookies);
+
+  await loadMaybeLogin(page, ACCOUNT_URL);
+
+  const currentBalance = await page.$eval('#current-expenses-value', helper.valueFromElement);
+  const availableBalance = await page.$eval('#available-balance-value', helper.valueFromElement);
+  const transactions = await page.$$eval('[name="DataContainer"]', processContainers);
+
+  const fixedFormat = (amount, digits=5) => {
+    return amount.toFixed(2).padStart(digits + 3, ' ');
+  };
+  log('Current balance:  ', chalk.red('$ ' + fixedFormat(currentBalance)));
+  log('Available balance:', chalk.green('$ ' + fixedFormat(availableBalance)));
+
+  log('Recent transactions:');
+  for (const t of transactions) {
+    const dollarAmount = `${t.pending ? '^' : ' '}$ ${fixedFormat(t.amount)}`;
+    let color = chalk.red;
+    if (t.amount >= 0) {
+      color = chalk.green;
+    } else if (t.pending) {
+      color = chalk.blue;
+    }
+    const parts = [chalk.magenta(t.date), chalk.gray(t.cardName), color(dollarAmount), t.description];
+    process.stderr.write(parts.join(' ') + '\n');
+  }
+
+  process.stdout.write(JSON.stringify({
+    currentBalance,
+    availableBalance,
+    transactions,
+  }));
+
+  await browser.close();
 })();
