@@ -97,6 +97,8 @@ function processContainers(containers) {
   const browser = await puppeteer.launch({headless, args});
   const page = await browser.newPage();
 
+  await fs.mkdir('./config', {recursive: true});
+
   const cookies = await helper.loadJSON('./config/cookies.json', []);
   log('Loaded', cookies.length, 'cookies');
   await page.setCookie(...cookies);
