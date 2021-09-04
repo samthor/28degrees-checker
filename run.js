@@ -75,9 +75,19 @@ function processContainers(containers) {
 
     const rawDate = q(container, pending ? 'Pending_transactionDate' : 'Transaction_TransactionDate');
     const d = new Date(rawDate);
+    let date;
     if (+d) {
       const inverseHours = d.getTimezoneOffset() / 60;
       d.setUTCHours(d.getUTCHours() - inverseHours);
+      date = d.toISOString().slice(0, 10);
+    } else if (rawDate.toLowerCase() === 'yesterday') {
+      const d = new Date();
+      d.setDate(d.getDate() - 1);
+      date = d.toISOString();
+    } else if (rawDate.toLowerCase() === 'today') {
+      date = (new Date).toISOString();
+    } else {
+      throw new TypeError(`unknown raw date: ${rawDate}`);
     }
 
     return {
@@ -85,7 +95,7 @@ function processContainers(containers) {
       description,
       cardName,
       amount,
-      date: d.toISOString().slice(0, 10),
+      date,
     };
   };
   return containers.map(processRow);
